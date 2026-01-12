@@ -1,4 +1,5 @@
 mod app;
+mod editor;
 mod requests;
 mod tui;
 use app::AppState;
@@ -6,10 +7,10 @@ use app::AppState;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Constructor later
-    let terminal = tui::init()?;
-    let mut app = AppState::new(terminal);
+    let mut terminal = tui::init()?;
+    let mut app = AppState::new();
 
-    let res = app.run().await;
+    let res = app.run(&mut terminal).await;
     tui::restore()?;
     if let Err(err) = res {
         println!("{err:?}");

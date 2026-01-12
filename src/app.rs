@@ -1,24 +1,21 @@
+use crate::{editor::Popup, tui::Tui};
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     widgets::{Block, Borders, Paragraph},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{collections::HashMap, io};
-
-use crate::tui::{self};
-// Yuck
 
 #[allow(unused)]
 pub struct AppState {
     pub selected_section: MainScreenElement,
     pub current_url: String,
     pub last_response: String,
-    pub current_headers: Option<HashMap<String, String>>,
-    pub current_body: Option<Value>,
+    pub current_headers: HashMap<String, String>,
+    pub current_body: Value,
     pub mode: EditorMode,
-    terminal: tui::Tui,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,7 +24,7 @@ pub enum EditorMode {
     Edit,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Copy)]
 pub enum MainScreenElement {
     Url,
     Headers,
@@ -36,15 +33,14 @@ pub enum MainScreenElement {
 }
 
 impl AppState {
-    pub fn new(terminal: tui::Tui) -> Self {
+    pub fn new() -> Self {
         Self {
             selected_section: MainScreenElement::Url,
             current_url: String::new(),
             last_response: String::new(),
-            current_headers: None,
-            current_body: None,
+            current_headers: HashMap::new(),
+            current_body: json!(""),
             mode: EditorMode::View,
-            terminal, //intentional unwrap
         }
     }
 
@@ -90,11 +86,24 @@ impl AppState {
             self.mode = EditorMode::View
         }
     }
+    fn get_editor(&self) -> Option<Popup<'_>> {
+        match self.selected_section {
+            MainScreenElement::Url => Some(self.get_url_popup()),
+            MainScreenElement::Headers => Some(self.get_headers_popup()),
+            MainScreenElement::Body => Some(self.get_body_popup()),
+            _ => None,
+        }
+    }
 
-    pub async fn run(&mut self) -> io::Result<()> {
-        self.terminal.clear()?;
+    pub async fn run(&mut self, terminal: &mut Tui) -> io::Result<()> {
+        terminal.clear()?;
         loop {
-            self.terminal.draw(|f| {
+            let mut popup = None;
+            if self.mode == EditorMode::Edit {
+                popup = self.get_editor();
+            }
+
+            terminal.draw(|f| {
                 // Split the screen into two chunks (Top for Input, Bottom for Output)
                 // For reference, these are considered nested layouts.
                 let chunks = Layout::default()
@@ -122,7 +131,7 @@ impl AppState {
                             .borders(Borders::ALL)
                             .title(" URL (Press 'q' to quit) ")
                             .border_style(Self::style_for(
-                                self.selected_section.clone(),
+                                self.selected_section,
                                 MainScreenElement::Url,
                             )),
                     );
@@ -133,14 +142,14 @@ impl AppState {
                     .borders(Borders::ALL)
                     .title(" Response ")
                     .border_style(Self::style_for(
-                        self.selected_section.clone(),
+                        self.selected_section,
                         MainScreenElement::Response,
                     ));
                 let headers = Block::default()
                     .borders(Borders::ALL)
                     .title(" Headers ")
                     .border_style(Self::style_for(
-                        self.selected_section.clone(),
+                        self.selected_section,
                         MainScreenElement::Headers,
                     ));
 
@@ -148,7 +157,7 @@ impl AppState {
                     .borders(Borders::ALL)
                     .title(" Body ")
                     .border_style(Self::style_for(
-                        self.selected_section.clone(),
+                        self.selected_section,
                         MainScreenElement::Body,
                     ));
 
@@ -156,6 +165,12 @@ impl AppState {
                 f.render_widget(response_body, body_h_res[1]);
                 f.render_widget(headers, h_body[0]);
                 f.render_widget(payload, h_body[1]);
+
+                if let Some(p) = popup {
+                    let area = centered_rect(60, 20, f.area());
+
+                    f.render_widget(p, area);
+                }
             })?;
 
             if event::poll(std::time::Duration::from_millis(16))?
@@ -192,4 +207,53 @@ impl AppState {
             normal_style
         }
     }
+
+    fn get_url_popup(&self) -> Popup<'_> {
+        Popup::default()
+            .content(self.current_url.clone())
+            .style(Style::new().yellow())
+            .title("Edit Your Url:")
+            .title_style(Style::new().white().bold())
+            .border_style(Style::new().red())
+    }
+    fn get_headers_popup(&self) -> Popup<'_> {
+        let mut headerstring: String = String::new();
+        for (k, v) in &self.current_headers {
+            headerstring.push_str(&format!("{} : {}\n", &k, &v));
+        }
+        Popup::default()
+            .content(headerstring)
+            .style(Style::new().yellow())
+            .title("Edit Headers:")
+            .title_style(Style::new().white().bold())
+            .border_style(Style::new().red())
+    }
+    fn get_body_popup(&self) -> Popup<'_> {
+        Popup::default()
+            .content("")
+            .style(Style::new().yellow())
+            .title("Edit JSON Body:")
+            .title_style(Style::new().white().bold())
+            .border_style(Style::new().red())
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
