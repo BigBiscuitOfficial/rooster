@@ -1,22 +1,11 @@
-use crate::{editor::Popup, tui::Tui};
-use crossterm::event::{self, Event, KeyCode};
+use crate::editor::Popup;
+use crossterm::event::KeyCode;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    widgets::{Block, Borders, Paragraph},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::BorderType,
 };
-use serde_json::{Value, json};
-use std::{collections::HashMap, io};
-
-#[allow(unused)]
-pub struct AppState {
-    pub selected_section: MainScreenElement,
-    pub current_url: String,
-    pub last_response: String,
-    pub current_headers: HashMap<String, String>,
-    pub current_body: Value,
-    pub mode: EditorMode,
-}
+use serde_json::{json, Value};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EditorMode {
@@ -32,33 +21,264 @@ pub enum MainScreenElement {
     Body,
 }
 
+pub struct TextBuffer {
+    pub content: String,
+    pub cursor_idx: usize, // Character Index, not byte index!
+}
+
+impl TextBuffer {
+    pub fn new() -> Self {
+        Self {
+            content: String::new(),
+            cursor_idx: 0,
+        }
+    }
+
+    pub fn from_string(s: String) -> Self {
+        let len = s.chars().count();
+        Self {
+            content: s,
+            cursor_idx: len,
+        }
+    }
+
+    pub fn insert(&mut self, c: char) {
+        let len_chars = self.content.chars().count();
+        if self.cursor_idx >= len_chars {
+            self.content.push(c);
+            self.cursor_idx = len_chars + 1;
+        } else {
+            let byte_idx = self
+                .content
+                .chars()
+                .take(self.cursor_idx)
+                .map(|c| c.len_utf8())
+                .sum();
+            self.content.insert(byte_idx, c);
+            self.cursor_idx += 1;
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.cursor_idx > 0 {
+            let prev_idx = self.cursor_idx - 1;
+            let byte_idx: usize = self
+                .content
+                .chars()
+                .take(prev_idx)
+                .map(|c| c.len_utf8())
+                .sum();
+
+            // Should be safe if logic holds, but remove panics if boundary wrong
+            if byte_idx < self.content.len() {
+                self.content.remove(byte_idx);
+                self.cursor_idx -= 1;
+            }
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        if self.cursor_idx > 0 {
+            self.cursor_idx -= 1;
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        let len = self.content.chars().count();
+        if self.cursor_idx < len {
+            self.cursor_idx += 1;
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        todo!()
+    }
+
+    // Helper to render with cursor
+    pub fn render_with_cursor<'a>(&self) -> Text<'a> {
+        let mut lines = Vec::new();
+        let mut current_line = Vec::new();
+
+        let char_count = self.content.chars().count();
+
+        for (i, c) in self.content.chars().enumerate() {
+            let is_cursor = i == self.cursor_idx;
+            let style = if is_cursor {
+                Style::default().bg(Color::White).fg(Color::Black)
+            } else {
+                Style::default()
+            };
+
+            // editor cursor fix
+            if c == '\n' {
+                if is_cursor {
+                    current_line.push(Span::styled(" ", style));
+                }
+                lines.push(Line::from(current_line));
+                current_line = Vec::new();
+                continue;
+            }
+
+            current_line.push(Span::styled(c.to_string(), style));
+        }
+
+        // Handle cursor at end of the buffer
+        if self.cursor_idx == char_count {
+            current_line.push(Span::styled(
+                " ",
+                Style::default().bg(Color::White).fg(Color::Black),
+            ));
+        }
+
+        lines.push(Line::from(current_line));
+
+        Text::from(lines)
+    }
+}
+
+pub struct BodyManager {
+    pub buffer: TextBuffer,
+    pub is_valid: bool,
+}
+
+impl BodyManager {
+    pub fn new() -> Self {
+        Self {
+            buffer: TextBuffer::new(),
+            is_valid: true,
+        }
+    }
+
+    pub fn update(&mut self, c: char) {
+        self.buffer.insert(c);
+        self.validate();
+    }
+
+    pub fn pop(&mut self) {
+        self.buffer.delete();
+        self.validate();
+    }
+
+    pub fn validate(&mut self) {
+        if self.buffer.content.trim().is_empty() {
+            self.is_valid = true;
+            return;
+        }
+        let v: Result<Value, _> = serde_json::from_str(&self.buffer.content);
+        self.is_valid = v.is_ok();
+    }
+}
+
+pub struct HeaderManager {
+    pub headers: Vec<(TextBuffer, TextBuffer)>, // Key Buffer, Value Buffer
+    pub selected_index: usize,
+    pub editing_value: bool, // false = key, true = value
+}
+
+impl HeaderManager {
+    pub fn new() -> Self {
+        Self {
+            headers: vec![(
+                TextBuffer::from_string("Content-Type".to_string()),
+                TextBuffer::from_string("application/json".to_string()),
+            )],
+            selected_index: 0,
+            editing_value: false,
+        }
+    }
+
+    pub fn add_new(&mut self) {
+        self.headers.push((TextBuffer::new(), TextBuffer::new()));
+        self.selected_index = self.headers.len() - 1;
+        self.editing_value = false;
+    }
+
+    pub fn remove_current(&mut self) {
+        if self.headers.len() > 0 {
+            self.headers.remove(self.selected_index);
+            if self.selected_index >= self.headers.len() && self.selected_index > 0 {
+                self.selected_index -= 1;
+            }
+        }
+    }
+
+    // Helper to get active buffer
+    pub fn get_active_buffer_mut(&mut self) -> Option<&mut TextBuffer> {
+        if self.headers.is_empty() {
+            return None;
+        }
+        let pair = &mut self.headers[self.selected_index];
+        if self.editing_value {
+            Some(&mut pair.1)
+        } else {
+            Some(&mut pair.0)
+        }
+    }
+}
+
+pub struct AppState {
+    pub selected_section: MainScreenElement,
+    pub url_buffer: TextBuffer,
+    pub last_response: String,
+
+    // New Managers
+    pub header_manager: HeaderManager,
+    pub body_manager: BodyManager,
+
+    pub current_body_json: Value,
+
+    pub mode: EditorMode,
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self {
             selected_section: MainScreenElement::Url,
-            current_url: String::new(),
+            url_buffer: TextBuffer::new(),
             last_response: String::new(),
-            current_headers: HashMap::new(),
-            current_body: json!(""),
+            header_manager: HeaderManager::new(),
+            body_manager: BodyManager::new(),
+            current_body_json: json!(""),
             mode: EditorMode::View,
         }
     }
 
+    // ... Navigation logic (left/right/up/down) remains largely same for View mode ...
     pub fn left(&mut self) {
         if self.selected_section == MainScreenElement::Response {
             self.selected_section = MainScreenElement::Headers;
+        } else if self.mode == EditorMode::Edit
+            && self.selected_section == MainScreenElement::Headers
+        {
+            if self.header_manager.editing_value {
+                self.header_manager.editing_value = false;
+            }
         }
     }
 
     pub fn right(&mut self) {
         if self.selected_section != MainScreenElement::Response
             && self.selected_section != MainScreenElement::Url
+            && self.mode == EditorMode::View
         {
             self.selected_section = MainScreenElement::Response
+        } else if self.mode == EditorMode::Edit
+            && self.selected_section == MainScreenElement::Headers
+        {
+            if !self.header_manager.editing_value {
+                self.header_manager.editing_value = true;
+            }
         }
     }
 
     pub fn up(&mut self) {
+        if self.mode == EditorMode::Edit && self.selected_section == MainScreenElement::Headers {
+            if self.header_manager.selected_index > 0 {
+                self.header_manager.selected_index -= 1;
+            }
+            return;
+        }
+
         if self.selected_section == MainScreenElement::Url {
         } else if self.selected_section == MainScreenElement::Response
             || self.selected_section == MainScreenElement::Headers
@@ -68,7 +288,17 @@ impl AppState {
             self.selected_section = MainScreenElement::Headers;
         }
     }
+
     pub fn down(&mut self) {
+        if self.mode == EditorMode::Edit && self.selected_section == MainScreenElement::Headers {
+            if self.header_manager.selected_index
+                < self.header_manager.headers.len().saturating_sub(1)
+            {
+                self.header_manager.selected_index += 1;
+            }
+            return;
+        }
+
         if self.selected_section == MainScreenElement::Response
             || self.selected_section == MainScreenElement::Body
         {
@@ -86,7 +316,8 @@ impl AppState {
             self.mode = EditorMode::View
         }
     }
-    fn get_editor(&self) -> Option<Popup<'_>> {
+
+    pub fn get_editor(&self) -> Option<Popup<'_>> {
         match self.selected_section {
             MainScreenElement::Url => Some(self.get_url_popup()),
             MainScreenElement::Headers => Some(self.get_headers_popup()),
@@ -95,165 +326,186 @@ impl AppState {
         }
     }
 
-    pub async fn run(&mut self, terminal: &mut Tui) -> io::Result<()> {
-        terminal.clear()?;
-        loop {
-            let mut popup = None;
-            if self.mode == EditorMode::Edit {
-                popup = self.get_editor();
+    pub fn delete_char(&mut self) {
+        match self.selected_section {
+            MainScreenElement::Url => {
+                self.url_buffer.delete();
             }
-
-            terminal.draw(|f| {
-                // Split the screen into two chunks (Top for Input, Bottom for Output)
-                // For reference, these are considered nested layouts.
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(3), // 3 lines high for input
-                        Constraint::Min(1),    // The rest for output
-                    ])
-                    .split(f.area());
-
-                let body_h_res = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints(vec![Constraint::Percentage(25), Constraint::Percentage(75)])
-                    .split(chunks[1]);
-                let h_body = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints(vec![Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(body_h_res[0]);
-
-                // Render a simple box for the URL input
-
-                let url_input = Paragraph::new("https://jsonplaceholder.typicode.com/todos/1")
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(" URL (Press 'q' to quit) ")
-                            .border_style(Self::style_for(
-                                self.selected_section,
-                                MainScreenElement::Url,
-                            )),
-                    );
-
-                // Render a simple box for the Body/Response
-
-                let response_body = Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Response ")
-                    .border_style(Self::style_for(
-                        self.selected_section,
-                        MainScreenElement::Response,
-                    ));
-                let headers = Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Headers ")
-                    .border_style(Self::style_for(
-                        self.selected_section,
-                        MainScreenElement::Headers,
-                    ));
-
-                let payload = Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Body ")
-                    .border_style(Self::style_for(
-                        self.selected_section,
-                        MainScreenElement::Body,
-                    ));
-
-                f.render_widget(url_input, chunks[0]);
-                f.render_widget(response_body, body_h_res[1]);
-                f.render_widget(headers, h_body[0]);
-                f.render_widget(payload, h_body[1]);
-
-                if let Some(p) = popup {
-                    let area = centered_rect(60, 20, f.area());
-
-                    f.render_widget(p, area);
+            MainScreenElement::Body => {
+                self.body_manager.pop();
+            }
+            MainScreenElement::Headers => {
+                if let Some(buf) = self.header_manager.get_active_buffer_mut() {
+                    buf.delete();
                 }
-            })?;
+            }
+            _ => {}
+        }
+    }
 
-            if event::poll(std::time::Duration::from_millis(16))?
-                && let Event::Key(key) = event::read()?
-            {
-                // This is so bad. Like bad.
-                match key.code {
-                    KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Up => self.up(),
-                    KeyCode::Down => {
-                        self.down();
+    pub fn capture_char(&mut self, keycode: KeyCode) {
+        let c_opt = match keycode {
+            KeyCode::Char(c) => Some(c),
+            KeyCode::Enter => Some('\n'),
+            _ => None,
+        };
+
+        if let Some(c) = c_opt {
+            match self.selected_section {
+                MainScreenElement::Url => {
+                    // Prevent newline in URL if preferred? Allow for now.
+                    // Actually usually URLs are one line.
+                    if c == '\n' {
+                        return;
                     }
-                    KeyCode::Left => {
-                        self.left();
-                    }
-                    KeyCode::Right => {
-                        self.right();
-                    }
-                    KeyCode::Enter => {
-                        self.toggle_edit();
-                    }
-                    _ => continue,
+                    self.url_buffer.insert(c);
                 }
+                MainScreenElement::Body => {
+                    self.body_manager.update(c);
+                }
+                MainScreenElement::Headers => {
+                    // CRITICAL FIX: Do NOT allow newlines in headers
+                    if c == '\n' {
+                        return;
+                    }
+
+                    if self.header_manager.headers.is_empty() {
+                        self.header_manager.add_new();
+                    }
+                    if let Some(buf) = self.header_manager.get_active_buffer_mut() {
+                        buf.insert(c);
+                    }
+                }
+                _ => {}
             }
         }
     }
-    fn style_for(selected: MainScreenElement, element: MainScreenElement) -> Style {
-        let selected_style = Style::default().fg(Color::Yellow);
-        let normal_style = Style::default().fg(Color::DarkGray);
 
-        if selected == element {
-            selected_style // break my computer
-        } else {
-            normal_style
+    // Header Actions
+    pub fn add_new_header(&mut self) {
+        self.header_manager.add_new();
+    }
+
+    pub fn remove_current_header(&mut self) {
+        self.header_manager.remove_current();
+    }
+
+    // Cursor Movement
+    pub fn cursor_left(&mut self) {
+        match self.selected_section {
+            MainScreenElement::Url => self.url_buffer.move_left(),
+            MainScreenElement::Body => self.body_manager.buffer.move_left(),
+            MainScreenElement::Headers => {
+                if let Some(buf) = self.header_manager.get_active_buffer_mut() {
+                    buf.move_left();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        match self.selected_section {
+            MainScreenElement::Url => self.url_buffer.move_right(),
+            MainScreenElement::Body => self.body_manager.buffer.move_right(),
+            MainScreenElement::Headers => {
+                if let Some(buf) = self.header_manager.get_active_buffer_mut() {
+                    buf.move_right();
+                }
+            }
+            _ => {}
         }
     }
 
     fn get_url_popup(&self) -> Popup<'_> {
         Popup::default()
-            .content(self.current_url.clone())
-            .style(Style::new().yellow())
-            .title("Edit Your Url:")
-            .title_style(Style::new().white().bold())
-            .border_style(Style::new().red())
+            .content(self.url_buffer.render_with_cursor())
+            .style(Style::default().fg(Color::White))
+            .title(" Edit URL (Esc to Exit) ")
+            .title_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .border_style(Style::default().fg(Color::Cyan))
+            .border_type(BorderType::Rounded)
     }
+
     fn get_headers_popup(&self) -> Popup<'_> {
-        let mut headerstring: String = String::new();
-        for (k, v) in &self.current_headers {
-            headerstring.push_str(&format!("{} : {}\n", &k, &v));
+        let mut text = Text::default();
+
+        for (i, (key_buf, val_buf)) in self.header_manager.headers.iter().enumerate() {
+            let mut line_spans = Vec::new();
+
+            // Selection indicator
+            if i == self.header_manager.selected_index {
+                line_spans.push(Span::styled("> ", Style::default().fg(Color::Yellow)));
+            } else {
+                line_spans.push(Span::raw("  "));
+            }
+
+            if i == self.header_manager.selected_index && !self.header_manager.editing_value {
+                let t = key_buf.render_with_cursor();
+                if let Some(first_line) = t.lines.first() {
+                    line_spans.extend(first_line.spans.clone());
+                }
+            } else {
+                line_spans.push(Span::raw(&key_buf.content));
+            }
+
+            line_spans.push(Span::raw(" : "));
+
+            // Value
+            if i == self.header_manager.selected_index && self.header_manager.editing_value {
+                let t = val_buf.render_with_cursor();
+                if let Some(first_line) = t.lines.first() {
+                    line_spans.extend(first_line.spans.clone());
+                }
+            } else {
+                line_spans.push(Span::raw(&val_buf.content));
+            }
+
+            text.lines.push(Line::from(line_spans));
         }
+
+        let instructions = "\n(Arrows: Nav, Tab: New, Ctrl+D: Delete)";
+        text.lines.push(Line::from(instructions));
+
         Popup::default()
-            .content(headerstring)
-            .style(Style::new().yellow())
-            .title("Edit Headers:")
-            .title_style(Style::new().white().bold())
-            .border_style(Style::new().red())
+            .content(text)
+            .style(Style::default().fg(Color::White))
+            .title(" Edit Headers ")
+            .title_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .border_style(Style::default().fg(Color::Cyan))
+            .border_type(BorderType::Rounded)
     }
+
     fn get_body_popup(&self) -> Popup<'_> {
+        let border_color = if self.body_manager.is_valid {
+            Color::Green
+        } else {
+            Color::Red
+        };
+        let title = if self.body_manager.is_valid {
+            " Edit Body (Valid JSON) "
+        } else {
+            " Edit Body (INVALID JSON) "
+        };
+
         Popup::default()
-            .content("")
-            .style(Style::new().yellow())
-            .title("Edit JSON Body:")
-            .title_style(Style::new().white().bold())
-            .border_style(Style::new().red())
+            .content(self.body_manager.buffer.render_with_cursor())
+            .style(Style::default().fg(Color::White))
+            .title(title)
+            .title_style(
+                Style::default()
+                    .fg(border_color)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .border_style(Style::default().fg(border_color))
+            .border_type(BorderType::Rounded)
     }
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
 }
