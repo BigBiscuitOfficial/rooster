@@ -118,8 +118,11 @@ impl TextBuffer {
                 current_line = Vec::new();
                 continue;
             }
-
-            current_line.push(Span::styled(c.to_string(), style));
+            if c == '\t' {
+                current_line.push(Span::styled("    ".to_string(), style));
+            } else {
+                current_line.push(Span::styled(c.to_string(), style));
+            }
         }
 
         // Handle cursor at end of the buffer
@@ -194,7 +197,7 @@ impl HeaderManager {
     }
 
     pub fn remove_current(&mut self) {
-        if self.headers.len() > 0 {
+        if !self.headers.is_empty() {
             self.headers.remove(self.selected_index);
             if self.selected_index >= self.headers.len() && self.selected_index > 0 {
                 self.selected_index -= 1;
@@ -249,10 +252,9 @@ impl AppState {
             self.selected_section = MainScreenElement::Headers;
         } else if self.mode == EditorMode::Edit
             && self.selected_section == MainScreenElement::Headers
+            && self.header_manager.editing_value
         {
-            if self.header_manager.editing_value {
-                self.header_manager.editing_value = false;
-            }
+            self.header_manager.editing_value = false;
         }
     }
 
@@ -264,10 +266,9 @@ impl AppState {
             self.selected_section = MainScreenElement::Response
         } else if self.mode == EditorMode::Edit
             && self.selected_section == MainScreenElement::Headers
+            && !self.header_manager.editing_value
         {
-            if !self.header_manager.editing_value {
-                self.header_manager.editing_value = true;
-            }
+            self.header_manager.editing_value = true;
         }
     }
 
@@ -362,9 +363,13 @@ impl AppState {
                 }
                 MainScreenElement::Body => {
                     self.body_manager.update(c);
+                    // Not ideal, but simpler than rewriting the functions signatures.
+                    if c == '\n' {
+                        self.body_manager.update('\t');
+                    }
                 }
                 MainScreenElement::Headers => {
-                    // CRITICAL FIX: Do NOT allow newlines in headers
+                    // slop broken
                     if c == '\n' {
                         return;
                     }
